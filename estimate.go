@@ -46,7 +46,7 @@ func init() {
 	estimateCmd.Flags().StringVarP(&estimate.Note, "note", "n", "", "Note")
 	estimateCmd.Flags().StringVarP(&estimateOutput, "output", "o", "estimate.pdf", "Output file (.pdf, .yaml, or .json)")
 	estimateCmd.Flags().StringVar(&estimateThemeName, "theme", "default", "Theme name (default, bitcoin) or path to a .yaml/.json theme file")
-	_ = viper.BindPFlag("theme", estimateCmd.Flags().Lookup("theme"))
+	_ = viper.BindPFlag("estimate_theme", estimateCmd.Flags().Lookup("theme"))
 	estimateCmd.Flags().StringVar(&estimateExportFmt, "export", "", "Export data as 'yaml' or 'json' instead of generating a PDF")
 }
 
@@ -69,7 +69,7 @@ var estimateCmd = &cobra.Command{
 		}
 
 		// Resolve theme — prefer env var INVOICE_THEME over flag default.
-		resolvedTheme := viper.GetString("theme")
+		resolvedTheme := viper.GetString("estimate_theme")
 		if resolvedTheme == "" {
 			resolvedTheme = estimateThemeName
 		}
