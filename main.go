@@ -38,11 +38,14 @@ type Invoice struct {
 	Currency string  `json:"currency" yaml:"currency"`
 
 	Note string `json:"note" yaml:"note"`
+
+	BitcoinAddress   string `json:"bitcoin_address" yaml:"bitcoin_address"`
+	LightningAddress string `json:"lightning_address" yaml:"lightning_address"`
 }
 
 func DefaultInvoice() Invoice {
 	return Invoice{
-		Id:         time.Now().Format("20060102"),
+		Id:         time.Now().Format("060102"),
 		Title:      "INVOICE",
 		Rates:      []float64{25},
 		Quantities: []int{2},
@@ -60,15 +63,18 @@ func DefaultInvoice() Invoice {
 var (
 	importPath     string
 	output         string
+	themeName      string
+	activeTheme    Theme
 	file           = Invoice{}
 	defaultInvoice = DefaultInvoice()
 )
 
 func init() {
 	viper.AutomaticEnv()
+	viper.SetEnvPrefix("INVOICE")
 
 	generateCmd.Flags().StringVar(&importPath, "import", "", "Imported file (.json/.yaml)")
-	generateCmd.Flags().StringVar(&file.Id, "id", time.Now().Format("20060102"), "ID")
+	generateCmd.Flags().StringVar(&file.Id, "id", time.Now().Format("060102"), "ID")
 	generateCmd.Flags().StringVar(&file.Title, "title", "INVOICE", "Title")
 
 	generateCmd.Flags().Float64SliceVarP(&file.Rates, "rate", "r", defaultInvoice.Rates, "Rates")
@@ -87,6 +93,12 @@ func init() {
 
 	generateCmd.Flags().StringVarP(&file.Note, "note", "n", "", "Note")
 	generateCmd.Flags().StringVarP(&output, "output", "o", "invoice.pdf", "Output file (.pdf)")
+
+	generateCmd.Flags().StringVar(&themeName, "theme", "default", "Theme name (default, bitcoin) or path to a .yaml/.json theme file")
+	_ = viper.BindPFlag("theme", generateCmd.Flags().Lookup("theme"))
+
+	generateCmd.Flags().StringVar(&file.BitcoinAddress, "bitcoin", "", "Bitcoin on-chain address for payment section")
+	generateCmd.Flags().StringVar(&file.LightningAddress, "lightning", "", "Lightning address or BOLT11 invoice for payment section")
 
 	flag.Parse()
 }
@@ -110,13 +122,29 @@ var generateCmd = &cobra.Command{
 			}
 		}
 
+		// Resolve theme — prefer env var INVOICE_THEME over flag default.
+		resolvedTheme := viper.GetString("theme")
+		if resolvedTheme == "" {
+			resolvedTheme = themeName
+		}
+		var err error
+		activeTheme, err = loadTheme(resolvedTheme)
+		if err != nil {
+			return err
+		}
+
+		// CLI --logo overrides the theme logo; fall back to theme logo if not set.
+		if file.Logo == "" && activeTheme.Logo != "" {
+			file.Logo = activeTheme.Logo
+		}
+
 		pdf := gopdf.GoPdf{}
 		pdf.Start(gopdf.Config{
-			PageSize: *gopdf.PageSizeA4,
+			PageSize: *gopdf.PageSizeLetter,
 		})
 		pdf.SetMargins(40, 40, 40, 40)
 		pdf.AddPage()
-		err := pdf.AddTTFFontData("Inter", interFont)
+		err = pdf.AddTTFFontData("Inter", interFont)
 		if err != nil {
 			return err
 		}
@@ -128,7 +156,7 @@ var generateCmd = &cobra.Command{
 
 		writeLogo(&pdf, file.Logo, file.From)
 		writeTitle(&pdf, file.Title, file.Id, file.Date)
-		writeBillTo(&pdf, file.To)
+		writeBillTo(&pdf, file.To, "BILL TO")
 		writeHeaderRow(&pdf)
 		subtotal := 0.0
 		for i := range file.Items {
@@ -152,6 +180,9 @@ var generateCmd = &cobra.Command{
 		if file.Due != "" {
 			writeDueDate(&pdf, file.Due)
 		}
+		if file.BitcoinAddress != "" || file.LightningAddress != "" {
+			writePayments(&pdf, file.BitcoinAddress, file.LightningAddress)
+		}
 		writeFooter(&pdf, file.Id)
 		output = strings.TrimSuffix(output, ".pdf") + ".pdf"
 		err = pdf.WritePdf(output)
@@ -167,6 +198,7 @@ var generateCmd = &cobra.Command{
 
 func main() {
 	rootCmd.AddCommand(generateCmd)
+	rootCmd.AddCommand(estimateCmd)
 	err := rootCmd.Execute()
 	if err != nil {
 		log.Fatal(err)

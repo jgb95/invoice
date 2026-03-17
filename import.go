@@ -32,12 +32,20 @@ func importData(path string, structure *Invoice, flags *pflag.FlagSet) error {
 		err = importJson(fileText, structure)
 	} else if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
 		err = importYaml(fileText, structure)
-
 	} else {
 		return fmt.Errorf("unsupported file type")
 	}
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// When an estimate file is imported into the generate command, promote it
+	// to a full invoice: update the title and add a default due date if absent.
+	if strings.EqualFold(structure.Title, "ESTIMATE") {
+		structure.Title = "INVOICE"
+		if structure.Due == "" {
+			structure.Due = DefaultInvoice().Due
+		}
 	}
 
 	for _, bytes := range byteBuffer {
