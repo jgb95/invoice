@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -11,71 +10,132 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func importData(path string, structure *Invoice, flags *pflag.FlagSet) error {
+// importData loads a Document from a JSON or YAML file, then applies any flags
+// that were explicitly set by the user on top of the imported values. Only
+// flags that the user actually provided on the command line override the file.
+func importData(path string, doc *Document, flags *pflag.FlagSet) error {
 	fileText, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("unable to read file")
+		return fmt.Errorf("unable to read file: %w", err)
 	}
-
-	var b []byte
-	var byteBuffer [][]byte
-	flags.Visit(func(f *pflag.Flag) {
-		if f.Value.Type() != "string" {
-			b = []byte(fmt.Sprintf(`{"%s":%s}`, f.Name, f.Value))
-		} else {
-			b = []byte(fmt.Sprintf(`{"%s":"%s"}`, f.Name, f.Value))
-		}
-		byteBuffer = append(byteBuffer, b)
-	})
 
 	if strings.HasSuffix(path, ".json") {
-		err = importJson(fileText, structure)
+		if err := importJSON(fileText, doc); err != nil {
+			return err
+		}
 	} else if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
-		err = importYaml(fileText, structure)
+		if err := importYAML(fileText, doc); err != nil {
+			return err
+		}
 	} else {
-		return fmt.Errorf("unsupported file type")
-	}
-	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("unsupported file type: %q (use .json, .yaml, or .yml)", path)
 	}
 
-	// When an estimate file is imported into the generate command, promote it
-	// to a full invoice: update the title and add a default due date if absent.
-	if strings.EqualFold(structure.Title, "ESTIMATE") {
-		structure.Title = "INVOICE"
-		if structure.Due == "" {
-			structure.Due = DefaultInvoice().Due
+	// Apply only the flags the user explicitly set, overriding the imported values.
+	flags.Visit(func(f *pflag.Flag) {
+		switch f.Name {
+		case "id":
+			doc.Id = f.Value.String()
+		case "from":
+			doc.From = f.Value.String()
+		case "to":
+			doc.To = f.Value.String()
+		case "logo":
+			doc.Logo = f.Value.String()
+		case "date":
+			doc.Date = f.Value.String()
+		case "due":
+			doc.Due = f.Value.String()
+		case "note":
+			doc.Note = f.Value.String()
+		case "currency":
+			doc.Currency = f.Value.String()
+		case "tax":
+			if v, err := parseFloat64Flag(f); err == nil {
+				doc.Tax = v
+			}
+		case "discount":
+			if v, err := parseFloat64Flag(f); err == nil {
+				doc.Discount = v
+			}
+		case "item":
+			doc.Items = splitSliceFlag(f.Value.String())
+		case "quantity":
+			doc.Quantities = parseIntSliceFlag(f.Value.String())
+		case "rate":
+			doc.Rates = parseFloat64SliceFlag(f.Value.String())
+		case "bitcoin":
+			doc.BitcoinAddress = f.Value.String()
+		case "lightning":
+			doc.LightningAddress = f.Value.String()
 		}
-	}
+	})
 
-	for _, bytes := range byteBuffer {
-		err = importJson(bytes, structure)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	return err
+	return nil
 }
 
-func importJson(text []byte, structure *Invoice) error {
+func importJSON(text []byte, doc *Document) error {
 	if !json.Valid(text) {
-		return fmt.Errorf("json file not correctly formatted")
+		return fmt.Errorf("JSON file is not valid")
 	}
-
-	err := json.Unmarshal(text, structure)
-	if err != nil {
-		return fmt.Errorf("json file not correctly formatted")
+	if err := json.Unmarshal(text, doc); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
-
 	return nil
 }
 
-func importYaml(text []byte, structure *Invoice) error {
-	err := yaml.Unmarshal(text, structure)
-	if err != nil {
-		return fmt.Errorf("yaml file not correctly formatted")
+func importYAML(text []byte, doc *Document) error {
+	if err := yaml.Unmarshal(text, doc); err != nil {
+		return fmt.Errorf("failed to parse YAML: %w", err)
 	}
-
 	return nil
+}
+
+// --- flag value helpers ------------------------------------------------------
+
+func parseFloat64Flag(f *pflag.Flag) (float64, error) {
+	var v float64
+	_, err := fmt.Sscanf(f.Value.String(), "%f", &v)
+	return v, err
+}
+
+// splitSliceFlag parses the string representation of a cobra StringSlice flag
+// (e.g. "[a,b,c]") into a []string.
+func splitSliceFlag(raw string) []string {
+	raw = strings.TrimPrefix(raw, "[")
+	raw = strings.TrimSuffix(raw, "]")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
+}
+
+// parseIntSliceFlag parses the string representation of a cobra IntSlice flag.
+func parseIntSliceFlag(raw string) []int {
+	parts := splitSliceFlag(raw)
+	result := make([]int, 0, len(parts))
+	for _, p := range parts {
+		var v int
+		if _, err := fmt.Sscanf(p, "%d", &v); err == nil {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// parseFloat64SliceFlag parses the string representation of a cobra Float64Slice flag.
+func parseFloat64SliceFlag(raw string) []float64 {
+	parts := splitSliceFlag(raw)
+	result := make([]float64, 0, len(parts))
+	for _, p := range parts {
+		var v float64
+		if _, err := fmt.Sscanf(p, "%f", &v); err == nil {
+			result = append(result, v)
+		}
+	}
+	return result
 }

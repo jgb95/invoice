@@ -13,9 +13,15 @@ import (
 )
 
 const (
-	quantityColumnOffset = 360
-	rateColumnOffset     = 405
-	amountColumnOffset   = 480
+	// Item table column X positions.
+	quantityColumnOffset = 370 // QTY header / values
+	rateColumnOffset     = 420 // RATE header / values
+	// amountRightX is the right edge for both the line-item AMOUNT column and the totals block.
+	// Everything right-aligns here so decimals always line up across the whole document.
+	amountRightX = 572
+
+	// totalsLabelX is where the label column in the totals/due-date block starts.
+	totalsLabelX = 330
 )
 
 const (
@@ -39,6 +45,18 @@ func setFillColor(pdf *gopdf.GoPdf, c Color) {
 	pdf.SetFillColor(uint8(c[0]), uint8(c[1]), uint8(c[2]))
 }
 
+// currencySymbol returns the symbol for a currency code, falling back to the
+// code itself (e.g. "CAD") when not found in the lookup table.
+func currencySymbol(code string) string {
+	if sym, ok := currencySymbols[code]; ok {
+		return sym
+	}
+	if code != "" {
+		return code + " "
+	}
+	return ""
+}
+
 // --- sections ----------------------------------------------------------------
 
 func writeLogo(pdf *gopdf.GoPdf, logo string, from string) {
@@ -54,14 +72,14 @@ func writeLogo(pdf *gopdf.GoPdf, logo string, from string) {
 	formattedFrom := strings.ReplaceAll(from, `\n`, "\n")
 	fromLines := strings.Split(formattedFrom, "\n")
 
-	for i := 0; i < len(fromLines); i++ {
+	for i, line := range fromLines {
 		if i == 0 {
 			_ = pdf.SetFont("Inter", "", 12)
-			_ = pdf.Cell(nil, fromLines[i])
+			_ = pdf.Cell(nil, line)
 			pdf.Br(18)
 		} else {
 			_ = pdf.SetFont("Inter", "", 10)
-			_ = pdf.Cell(nil, fromLines[i])
+			_ = pdf.Cell(nil, line)
 			pdf.Br(15)
 		}
 	}
@@ -90,11 +108,14 @@ func writeTitle(pdf *gopdf.GoPdf, title, id, date string) {
 func writeDueDate(pdf *gopdf.GoPdf, due string) {
 	_ = pdf.SetFont("Inter", "", 9)
 	setTextColor(pdf, activeTheme.SecondaryText)
-	pdf.SetX(rateColumnOffset)
+	pdf.SetX(totalsLabelX)
 	_ = pdf.Cell(nil, "Due Date")
 	setTextColor(pdf, activeTheme.PrimaryText)
 	_ = pdf.SetFontSize(11)
-	pdf.SetX(amountColumnOffset - 15)
+	// Right-align the due date value at amountRightX.
+	if w, err := pdf.MeasureTextWidth(due); err == nil {
+		pdf.SetX(amountRightX - w)
+	}
 	_ = pdf.Cell(nil, due)
 	pdf.Br(12)
 }
@@ -108,16 +129,16 @@ func writeBillTo(pdf *gopdf.GoPdf, to string, label string) {
 	formattedTo := strings.ReplaceAll(to, `\n`, "\n")
 	toLines := strings.Split(formattedTo, "\n")
 
-	for i := 0; i < len(toLines); i++ {
+	for i, line := range toLines {
 		if i == 0 {
 			_ = pdf.SetFont("Inter", "", 15)
 			setTextColor(pdf, activeTheme.SecondaryText)
-			_ = pdf.Cell(nil, toLines[i])
+			_ = pdf.Cell(nil, line)
 			pdf.Br(20)
 		} else {
 			_ = pdf.SetFont("Inter", "", 10)
 			setTextColor(pdf, activeTheme.SecondaryText)
-			_ = pdf.Cell(nil, toLines[i])
+			_ = pdf.Cell(nil, line)
 			pdf.Br(15)
 		}
 	}
@@ -132,13 +153,56 @@ func writeHeaderRow(pdf *gopdf.GoPdf) {
 	_ = pdf.Cell(nil, "QTY")
 	pdf.SetX(rateColumnOffset)
 	_ = pdf.Cell(nil, "RATE")
-	pdf.SetX(amountColumnOffset)
+	// Right-align "AMOUNT" header to amountRightX.
+	if w, err := pdf.MeasureTextWidth("AMOUNT"); err == nil {
+		pdf.SetX(amountRightX - w)
+	}
 	_ = pdf.Cell(nil, "AMOUNT")
 	pdf.Br(24)
 }
 
-func writeNotes(pdf *gopdf.GoPdf, notes string) {
-	pdf.SetY(550)
+func writeRow(pdf *gopdf.GoPdf, doc *Document, item string, quantity int, rate float64) {
+	_ = pdf.SetFont("Inter", "", 11)
+	setTextColor(pdf, activeTheme.PrimaryText)
+
+	sym := currencySymbol(doc.Currency)
+	total := float64(quantity) * rate
+	amountStr := sym + strconv.FormatFloat(total, 'f', 2, 64)
+
+	_ = pdf.Cell(nil, item)
+	pdf.SetX(quantityColumnOffset)
+	_ = pdf.Cell(nil, strconv.Itoa(quantity))
+	pdf.SetX(rateColumnOffset)
+	_ = pdf.Cell(nil, sym+strconv.FormatFloat(rate, 'f', 2, 64))
+	// Right-align amount value to amountRightX.
+	if w, err := pdf.MeasureTextWidth(amountStr); err == nil {
+		pdf.SetX(amountRightX - w)
+	}
+	_ = pdf.Cell(nil, amountStr)
+	pdf.Br(24)
+}
+
+// writeNotesAndTotals renders the notes section (left column) and the subtotal/
+// tax/discount/total block (right column) at the same Y position, dynamically
+// positioned below the last line item rather than at a hardcoded offset.
+func writeNotesAndTotals(pdf *gopdf.GoPdf, doc *Document, notes string, subtotal, tax, discount float64) {
+	// Use a minimum Y so content never crowds the line items, but don't
+	// hardcode a single fixed value — allow more items to push it down.
+	const minY = 500.0
+	currentY := pdf.GetY()
+	if currentY < minY {
+		currentY = minY
+	}
+	pdf.SetY(currentY)
+
+	if notes != "" {
+		writeNotes(pdf, notes, currentY)
+	}
+	writeTotals(pdf, doc, subtotal, tax, discount, currentY)
+}
+
+func writeNotes(pdf *gopdf.GoPdf, notes string, startY float64) {
+	pdf.SetXY(40, startY)
 
 	_ = pdf.SetFont("Inter", "", 9)
 	setTextColor(pdf, activeTheme.Accent)
@@ -148,70 +212,64 @@ func writeNotes(pdf *gopdf.GoPdf, notes string) {
 	setTextColor(pdf, activeTheme.PrimaryText)
 
 	formattedNotes := strings.ReplaceAll(notes, `\n`, "\n")
-	notesLines := strings.Split(formattedNotes, "\n")
-
-	for i := 0; i < len(notesLines); i++ {
-		_ = pdf.Cell(nil, notesLines[i])
+	for _, line := range strings.Split(formattedNotes, "\n") {
+		pdf.SetX(40)
+		_ = pdf.Cell(nil, line)
 		pdf.Br(15)
 	}
-
-	pdf.Br(48)
 }
 
-func writeFooter(pdf *gopdf.GoPdf, id string) {
-	pdf.SetY(750)
+func writeTotals(pdf *gopdf.GoPdf, doc *Document, subtotal, tax, discount float64, startY float64) {
+	pdf.SetXY(40, startY)
 
-	_ = pdf.SetFont("Inter", "", 10)
-	setTextColor(pdf, activeTheme.Accent)
-	_ = pdf.Cell(nil, id)
-	setStrokeColor(pdf, activeTheme.Line)
-	pdf.Line(pdf.GetX()+10, pdf.GetY()+6, 550, pdf.GetY()+6)
-	pdf.Br(48)
-}
-
-func writeRow(pdf *gopdf.GoPdf, item string, quantity int, rate float64) {
-	_ = pdf.SetFont("Inter", "", 11)
-	setTextColor(pdf, activeTheme.PrimaryText)
-
-	total := float64(quantity) * rate
-	amount := strconv.FormatFloat(total, 'f', 2, 64)
-
-	_ = pdf.Cell(nil, item)
-	pdf.SetX(quantityColumnOffset)
-	_ = pdf.Cell(nil, strconv.Itoa(quantity))
-	pdf.SetX(rateColumnOffset)
-	_ = pdf.Cell(nil, currencySymbols[file.Currency]+strconv.FormatFloat(rate, 'f', 2, 64))
-	pdf.SetX(amountColumnOffset)
-	_ = pdf.Cell(nil, currencySymbols[file.Currency]+amount)
-	pdf.Br(24)
-}
-
-func writeTotals(pdf *gopdf.GoPdf, subtotal float64, tax float64, discount float64) {
-	pdf.SetY(550)
-
-	writeTotal(pdf, subtotalLabel, subtotal)
+	writeTotal(pdf, doc, subtotalLabel, subtotal, false)
 	if tax > 0 {
-		writeTotal(pdf, taxLabel, tax)
+		label := formatPercentLabel(taxLabel, doc.Tax)
+		writeTotal(pdf, doc, label, tax, false)
 	}
 	if discount > 0 {
-		writeTotal(pdf, discountLabel, discount)
+		label := formatPercentLabel(discountLabel, doc.Discount)
+		// Discount is displayed as a negative value to make it visually clear.
+		writeTotal(pdf, doc, label, -discount, false)
 	}
-	writeTotal(pdf, totalLabel, subtotal+tax-discount)
+	writeTotal(pdf, doc, totalLabel, subtotal+tax-discount, true)
 }
 
-func writeTotal(pdf *gopdf.GoPdf, label string, total float64) {
+// formatPercentLabel returns a label like "Tax (8.25%)" or "Discount (5%)".
+// Trailing zeros after the decimal are stripped (e.g. 5.00 → "5%").
+func formatPercentLabel(base string, pct float64) string {
+	// Use %g to strip unnecessary trailing zeros.
+	return base + " (" + strconv.FormatFloat(pct, 'f', -1, 64) + "%)"
+}
+
+func writeTotal(pdf *gopdf.GoPdf, doc *Document, label string, amount float64, isTotal bool) {
+	// Draw the label in the left part of the totals block.
 	_ = pdf.SetFont("Inter", "", 9)
 	setTextColor(pdf, activeTheme.SecondaryText)
-	pdf.SetX(rateColumnOffset)
+	pdf.SetX(totalsLabelX)
 	_ = pdf.Cell(nil, label)
-	setTextColor(pdf, activeTheme.PrimaryText)
-	_ = pdf.SetFontSize(12)
-	pdf.SetX(amountColumnOffset - 15)
-	if label == totalLabel {
+
+	// Format the amount string.
+	sym := currencySymbol(doc.Currency)
+	var formatted string
+	if amount < 0 {
+		formatted = "-" + sym + strconv.FormatFloat(-amount, 'f', 2, 64)
+	} else {
+		formatted = sym + strconv.FormatFloat(amount, 'f', 2, 64)
+	}
+
+	// Set font for the amount, then right-align it at totalsAmountRightX.
+	if isTotal {
 		_ = pdf.SetFont("Inter-Bold", "", 11.5)
 		setTextColor(pdf, activeTheme.Accent)
+	} else {
+		_ = pdf.SetFont("Inter", "", 12)
+		setTextColor(pdf, activeTheme.PrimaryText)
 	}
-	_ = pdf.Cell(nil, currencySymbols[file.Currency]+strconv.FormatFloat(total, 'f', 2, 64))
+	if w, err := pdf.MeasureTextWidth(formatted); err == nil {
+		pdf.SetX(amountRightX - w)
+	}
+	_ = pdf.Cell(nil, formatted)
 	pdf.Br(24)
 }
 
@@ -261,14 +319,15 @@ func wrapText(pdf *gopdf.GoPdf, text string, maxWidth float64) []string {
 	return lines
 }
 
-// writePayments renders a payment section beneath the due date with QR codes
-// and clickable URIs for Bitcoin and/or Lightning addresses.
+// writePayments renders a payment section with QR codes and clickable URIs for
+// Bitcoin and/or Lightning addresses.
 //
 // Layout (US Letter, 40 pt margins):
-//   contentWidth = 612 - 2×40 = 532 pt
-//   Each block  = qrSize + colGap + textColWidth
-//   Two blocks  = 2×block + blockGap  ≤ contentWidth
-//   One block   = block  (centered)
+//
+//	contentWidth = 612 - 2×40 = 532 pt
+//	Each block  = qrSize + colGap + textColWidth
+//	Two blocks  = 2×block + blockGap  ≤ contentWidth
+//	One block   = block  (centered)
 func writePayments(pdf *gopdf.GoPdf, bitcoinAddr, lightningAddr string) {
 	// Leave a small gap after the due date / totals area.
 	pdf.Br(24)
@@ -280,13 +339,13 @@ func writePayments(pdf *gopdf.GoPdf, bitcoinAddr, lightningAddr string) {
 	pdf.Br(18)
 
 	const (
-		pageWidth  = 612.0 // US Letter
-		margin     = 40.0
-		qrSize     = 80.0 // QR code display size in points
-		colGap     = 12.0 // gap between QR and its text column
-		blockGap   = 24.0 // gap between two side-by-side blocks
-		fontSize   = 7.0
-		lineH      = 10.0 // line height for address text
+		pageWidth   = 612.0 // US Letter
+		margin      = 40.0
+		qrSize      = 80.0 // QR code display size in points
+		colGap      = 12.0 // gap between QR and its text column
+		blockGap    = 24.0 // gap between two side-by-side blocks
+		fontSize    = 7.0
+		lineH       = 10.0 // line height for address text
 		labelExtraH = 14.0 // space reserved for the block label above the address
 	)
 
@@ -371,6 +430,17 @@ func writePayments(pdf *gopdf.GoPdf, bitcoinAddr, lightningAddr string) {
 
 	// Move Y past the payment block back to left margin.
 	pdf.SetXY(margin, startY+qrSize+12)
+}
+
+func writeFooter(pdf *gopdf.GoPdf, id string) {
+	pdf.SetY(750)
+
+	_ = pdf.SetFont("Inter", "", 10)
+	setTextColor(pdf, activeTheme.Accent)
+	_ = pdf.Cell(nil, id)
+	setStrokeColor(pdf, activeTheme.Line)
+	pdf.Line(pdf.GetX()+10, pdf.GetY()+6, amountRightX, pdf.GetY()+6)
+	pdf.Br(48)
 }
 
 // --- utilities ---------------------------------------------------------------
